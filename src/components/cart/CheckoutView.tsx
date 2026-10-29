@@ -1,0 +1,686 @@
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useNavigate } from "react-router";
+import { Lock } from "lucide-react";
+import Link from "@/components/ui/Link";
+import { AddressForm, AddressLines } from "@/components/account/Addresses";
+import { ProductPhoto } from "@/components/products/ProductPhoto";
+import { Button, ButtonLink } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { FormStatus } from "@/components/ui/Field";
+import { errorMessage } from "@/lib/errors";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { addressApi, removeAddressError } from "@/lib/api/addresses";
+import { ApiError, type ErrorKind } from "@/lib/api/client";
+import { checkoutApi } from "@/lib/api/checkout";
+import { orderApi } from "@/lib/api/orders";
+import type { AddressDTO, PriceBreakdown } from "@/lib/api/types";
+import { cartProblems, cartSignature, type Cart } from "@/lib/cart";
+import { formatPrice } from "@/lib/format";
+import { formatPaise } from "@/lib/orders";
+import { completePayment, type PayResult } from "@/lib/payOrder";
+import { clearPending, PAYMENT_WINDOW_MINUTES, readPending, savePending, type PendingPayment } from "@/lib/pendingPayment";
+import { site } from "@/lib/site";
+import { cn } from "@/lib/cn";
+import { useHydrated } from "@/hooks/useHydrated";
+import { useCart } from "@/store/cart";
+import { useAuth } from "@/store/auth";
+import type { AuthUser } from "@/lib/api/auth";
+import { isIntl, market } from "@/lib/market";
+
+type Method = "RAZORPAY" | "COD";
+
+const METHODS: { id: Method; label: string; hint: string }[] = isIntl
+  ? [{ id: "RAZORPAY", label: "Pay online", hint: "Cards in US dollars, secured by Razorpay" }]
+  : [
+      { id: "RAZORPAY", label: "Pay online", hint: "UPI, cards, net banking and wallets, secured by Razorpay" },
+      { id: "COD", label: "Cash on delivery", hint: "Pay when your order arrives" },
+    ];
+
+const LOAD_ERROR_TITLE: Record<ErrorKind, string> = {
+  session: "Please sign in again",
+  forbidden: "This account can't place orders",
+  "not-found": "We couldn't load your bag",
+  invalid: "We couldn't load your bag",
+  conflict: "Your bag changed in another window",
+  server: "Our server had a problem",
+  network: "You appear to be offline",
+};
+
+export function CheckoutView() {
+  const hydrated = useHydrated();
+  const user = useAuth((s) => s.user);
+
+  if (!hydrated)
+    return (
+      <div className="container-site grid grid-cols-1 gap-10 py-14 lg:grid-cols-2">
+        <Skeleton className="h-[30rem]" />
+        <Skeleton className="h-[20rem]" />
+      </div>
+    );
+
+  if (!user) return <SignInFirst />;
+  return <SignedInCheckout key={user.email} user={user} />;
+}
+
+function SignInFirst() {
+  return (
+    <div className="bg-ivory">
+      <div className="container-site max-w-3xl py-14 md:py-20">
+        <h1 className="text-display-sm uppercase">Checkout</h1>
+        <div className="mt-10 border border-hair bg-sand/60 p-7 md:p-9">
+          <p className="label">Sign in to continue</p>
+          <p className="mt-4 max-w-prose text-[0.92rem] text-ink-muted">
+            Your bag is saved to your {site.name} account, so you can check out on any device, follow delivery, download invoices and reorder later.
+          </p>
+          <div className="mt-7 flex flex-col gap-3 sm:flex-row">
+            <ButtonLink href="/account?next=/checkout" size="lg" arrow className="sm:flex-1">
+              Sign in
+            </ButtonLink>
+            <ButtonLink href="/account?mode=signup&next=/checkout" variant="outline" size="lg" className="sm:flex-1">
+              Create account
+            </ButtonLink>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SignedInCheckout({ user }: { user: AuthUser }) {
+  const navigate = useNavigate();
+  const { cart, status, error, pending: cartPending, load } = useCart();
+
+  const [price, setPrice] = useState<PriceBreakdown | null>(null);
+  const [priceError, setPriceError] = useState<string | null>(null);
+  const [priceAttempt, setPriceAttempt] = useState(0);
+  const [couponInput, setCouponInput] = useState("");
+  const [coupon, setCoupon] = useState<string | null>(null);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [couponBusy, setCouponBusy] = useState(false);
+  const couponRef = useRef<string | null>(null);
+  couponRef.current = coupon;
+
+  const [addresses, setAddresses] = useState<AddressDTO[] | null>(null);
+  const [addressError, setAddressError] = useState<string | null>(null);
+  const [addressAttempt, setAddressAttempt] = useState(0);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null);
+  const [removeError, setRemoveError] = useState<{ id: number; message: string } | null>(null);
+
+  const [method, setMethod] = useState<Method>("RAZORPAY");
+  const [phase, setPhase] = useState<"idle" | "placing" | "paying" | "verifying">("idle");
+  const [placeError, setPlaceError] = useState<string | null>(null);
+  const [payResult, setPayResult] = useState<PayResult | null>(null);
+  const busy = useRef(false);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const signature = cart ? cartSignature(cart) : "";
+  const problems = cart ? cartProblems(cart) : [];
+
+  useEffect(() => {
+    if (!cart?.lines.length) {
+      setPrice(null);
+      return;
+    }
+    let live = true;
+    const t = setTimeout(async () => {
+      try {
+        const p = await checkoutApi.preview(couponRef.current ?? undefined);
+        if (!live) return;
+        setPrice(p);
+        setPriceError(null);
+        if (couponRef.current && !p.couponCode) {
+          setCoupon(null);
+          setCouponError(p.couponMessage || "This coupon no longer applies.");
+        }
+      } catch (e) {
+        if (live) setPriceError(errorMessage(e));
+      }
+    }, 250);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-price only when the cart's contents change
+  }, [signature, priceAttempt]);
+
+  useEffect(() => {
+    let live = true;
+    setAddressError(null);
+    addressApi
+      .mine()
+      .then((list) => {
+        if (!live) return;
+        setAddresses(list);
+        setSelected((s) => (s && list.some((a) => a.addressId === s) ? s : (list[list.length - 1]?.addressId ?? null)));
+        if (!list.length) setAdding(true);
+      })
+      .catch((e) => live && setAddressError(errorMessage(e)));
+    return () => {
+      live = false;
+    };
+  }, [addressAttempt]);
+
+  const applyCoupon = async (e: FormEvent) => {
+    e.preventDefault();
+    const code = couponInput.trim().toUpperCase();
+    if (!code) return setCouponError("Enter a coupon code.");
+    if (!cart?.lines.length) return;
+    setCouponBusy(true);
+    setCouponError(null);
+    try {
+      const p = await checkoutApi.preview(code);
+      setPrice(p);
+      if (p.couponCode) {
+        setCoupon(p.couponCode);
+        setCouponInput("");
+      } else {
+        setCouponError(p.couponMessage || "That coupon can't be used.");
+      }
+    } catch (err) {
+      setCouponError(errorMessage(err));
+    } finally {
+      setCouponBusy(false);
+    }
+  };
+
+  const removeCoupon = async () => {
+    setCoupon(null);
+    setCouponError(null);
+    try {
+      setPrice(await checkoutApi.preview());
+    } catch (e) {
+      setPriceError(errorMessage(e));
+    }
+  };
+
+  const removeAddress = async (id: number) => {
+    setRemoveError(null);
+    try {
+      await addressApi.remove(id);
+      setAddresses((l) => l?.filter((a) => a.addressId !== id) ?? l);
+      if (selected === id) setSelected(null);
+      if (editing === id) setEditing(null);
+    } catch (e) {
+      setRemoveError({ id, message: removeAddressError(e) });
+    }
+  };
+
+  const address = addresses?.find((a) => a.addressId === selected) ?? null;
+  const cartBusy = cartPending.length > 0;
+  const ready = !!cart && cart.lines.length > 0 && !problems.length && !cartBusy && !!price && !!address && price.total > 0;
+
+  const intentOf = (c: Cart) => `${cartSignature(c)}|a${selected ?? ""}|c${coupon ?? ""}`;
+
+  const finish = useCallback(
+    (orderId: number) => {
+      clearPending();
+      void load();
+      navigate(`/account/orders/${orderId}?placed=1`, { replace: true });
+    },
+    [navigate, load],
+  );
+
+  const pay = async (p: PendingPayment) => {
+    setPhase("paying");
+    const r = await completePayment(p, { name: user.username, email: user.email, contact: address?.phoneNumber }, () => setPhase("verifying"));
+    if (r.kind === "paid") return finish(r.orderId);
+    if (r.kind === "closed") clearPending();
+    setPayResult(r);
+    setPhase("idle");
+  };
+
+  const placeOrder = async () => {
+    if (busy.current || !ready || !address || !cart) return;
+    busy.current = true;
+    setPlaceError(null);
+    setPayResult(null);
+    setPhase("placing");
+    try {
+      const fresh = await load();
+      if (!fresh || !fresh.lines.length || cartProblems(fresh).length) {
+        setPhase("idle");
+        return;
+      }
+      if (cartSignature(fresh) !== signature) {
+        setPlaceError("Your bag changed. Please check the total and place your order again.");
+        setPhase("idle");
+        return;
+      }
+      const intent = intentOf(fresh);
+
+      if (method === "RAZORPAY") {
+        const existing = readPending();
+        if (existing && existing.bag === intent && existing.email === user.email) {
+          const status = await orderApi
+            .get(existing.orderId)
+            .then((o) => o.status)
+            .catch(() => null);
+          if (status === "PAID") return finish(existing.orderId);
+          if (status === "PENDING_PAYMENT") return await pay(existing);
+          clearPending();
+        }
+      }
+
+      const res = await checkoutApi.place({ addressId: address.addressId, paymentMethod: method, couponCode: coupon ?? undefined, market });
+
+      if (method === "COD") {
+        finish(res.orderId);
+        return;
+      }
+
+      if (!res.razorpayOrderId || !res.razorpayKeyId || !res.amount) {
+        setPlaceError(`Order #${res.orderId} was created, but online payment couldn't be started. It will be cancelled automatically if unpaid; please try again or choose cash on delivery.`);
+        setPhase("idle");
+        return;
+      }
+      const pending: PendingPayment = {
+        orderId: res.orderId,
+        razorpayOrderId: res.razorpayOrderId,
+        keyId: res.razorpayKeyId,
+        amount: res.amount,
+        currency: res.currency || "INR",
+        email: res.customerEmail || user.email,
+        bag: intent,
+        createdAt: Date.now(),
+      };
+      savePending(pending);
+      await pay(pending);
+    } catch (e) {
+      setPlaceError(errorMessage(e));
+      setPhase("idle");
+      if (e instanceof ApiError && (e.status === 400 || e.status === 404 || e.status === 409)) {
+        void load();
+        setPriceAttempt((n) => n + 1);
+      }
+    } finally {
+      busy.current = false;
+    }
+  };
+
+  const acceptAvailable = async () => {
+    const store = useCart.getState();
+    for (const p of problems) {
+      const line = cart?.lines.find((l) => l.key === p.key);
+      if (!line) continue;
+      await (p.canOrder > 0 ? store.setQuantity(line.productId, p.canOrder) : store.remove(line.productId));
+    }
+  };
+
+  const removeLine = (key: string) => {
+    const line = cart?.lines.find((l) => l.key === key);
+    if (!line) return;
+    void useCart.getState().remove(line.productId);
+  };
+
+  const total = price ? formatPaise(price.total) : null;
+  const working = phase !== "idle";
+  const pendingHere = (() => {
+    const p = readPending();
+    return p && cart && p.bag === intentOf(cart) && p.email === user.email ? p : null;
+  })();
+
+  if (!cart && status === "error") {
+    return (
+      <div className="container-site max-w-3xl py-14">
+        <h1 className="text-display-sm uppercase">Checkout</h1>
+        <Notice tone="error" title={LOAD_ERROR_TITLE[error?.kind ?? "server"]}>
+          <p>{error?.message}</p>
+          <button type="button" onClick={() => void load()} className="label mt-3 underline underline-offset-4">
+            Try again
+          </button>
+        </Notice>
+      </div>
+    );
+  }
+  if (!cart) {
+    return (
+      <div className="container-site grid grid-cols-1 gap-10 py-14 lg:grid-cols-2" aria-busy="true" aria-label="Loading your bag">
+        <Skeleton className="h-[30rem]" />
+        <Skeleton className="h-[20rem]" />
+      </div>
+    );
+  }
+  if (!cart.lines.length && phase === "idle") {
+    return (
+      <div className="container-site py-section">
+        <EmptyState title="Your bag is empty" body="Add a fragrance to continue to checkout." action={<ButtonLink href="/collections/all" arrow>Shop the collection</ButtonLink>} />
+      </div>
+    );
+  }
+
+  return (
+    <Layout
+      summary={
+        <Summary cart={cart}>
+          {price ? (
+            <ServerTotals price={price} onRemoveCoupon={coupon ? removeCoupon : undefined} />
+          ) : priceError ? (
+            <p role="alert" className="mt-5 text-[0.82rem] text-[#9b3b2a]">
+              {priceError}
+            </p>
+          ) : (
+            <div className="mt-5 space-y-3 border-t border-hair pt-5" aria-busy="true" aria-label="Calculating total">
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-2/3" />
+              <Skeleton className="h-6 w-full" />
+            </div>
+          )}
+          <form onSubmit={applyCoupon} noValidate className="mt-6 border-t border-hair pt-5" aria-label="Coupon">
+            <label htmlFor="co-coupon" className="label mb-2 block text-[0.62rem] text-ink-muted">
+              Coupon code
+            </label>
+            <div className="flex gap-2">
+              <input
+                id="co-coupon"
+                value={couponInput}
+                onChange={(e) => {
+                  setCouponInput(e.target.value.toUpperCase());
+                  if (couponError) setCouponError(null);
+                }}
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={40}
+                aria-invalid={!!couponError}
+                aria-describedby={couponError ? "co-coupon-err" : undefined}
+                placeholder={coupon ? `${coupon} applied` : ""}
+                className={cn("h-11 min-w-0 flex-1 border bg-ivory px-4 text-[0.88rem] uppercase tracking-[0.12em] outline-none focus:border-espresso", couponError ? "border-[#9b3b2a]" : "border-espresso/20")}
+              />
+              <Button type="submit" variant="outline" size="sm" className="h-11" disabled={couponBusy || !cart.lines.length} aria-busy={couponBusy}>
+                {couponBusy ? "Checking" : "Apply"}
+              </Button>
+            </div>
+            {couponError && (
+              <p id="co-coupon-err" role="alert" className="mt-2 text-[0.75rem] text-[#9b3b2a]">
+                {couponError}
+              </p>
+            )}
+          </form>
+        </Summary>
+      }
+    >
+      <h1 className="text-display-sm uppercase">Checkout</h1>
+      <p className="mt-3 text-[0.85rem] text-ink-muted">Signed in as {user.email}</p>
+
+      {error && (
+        <Notice tone="error" title={LOAD_ERROR_TITLE[error.kind]}>
+          <p>{error.message}</p>
+          <button type="button" onClick={() => void load()} className="label mt-3 underline underline-offset-4">
+            Try again
+          </button>
+        </Notice>
+      )}
+      {!!problems.length && (
+        <Notice tone="error" title="Some items need your attention">
+          <ul className="space-y-2">
+            {problems.map((p) => (
+              <li key={p.key} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                <span>{p.message}</span>
+                <button type="button" onClick={() => removeLine(p.key)} disabled={cartBusy} className="label shrink-0 text-[0.6rem] underline underline-offset-4 disabled:opacity-40">
+                  Remove from bag
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2">
+            {problems.some((p) => p.canOrder > 0) && (
+              <button type="button" onClick={() => void acceptAvailable()} disabled={cartBusy} className="label underline underline-offset-4 disabled:opacity-40">
+                Use available quantities
+              </button>
+            )}
+            <button type="button" onClick={() => void load()} disabled={cartBusy} className="label underline underline-offset-4 disabled:opacity-40">
+              Check again
+            </button>
+          </div>
+          <p className="mt-3 text-[0.75rem]">Nothing will be charged until every item in your bag can be ordered.</p>
+        </Notice>
+      )}
+
+      <fieldset className="mt-10" disabled={working}>
+        <legend className="label mb-5">Delivery address</legend>
+        {addressError && (
+          <Notice tone="error">
+            <p>{addressError}</p>
+            <button type="button" onClick={() => setAddressAttempt((n) => n + 1)} className="label mt-3 underline underline-offset-4">
+              Try again
+            </button>
+          </Notice>
+        )}
+        {!addresses && !addressError && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Skeleton className="h-36" />
+            <Skeleton className="h-36" />
+          </div>
+        )}
+        {!!addresses?.length && (
+          <div role="radiogroup" aria-label="Saved addresses" className="grid gap-3 sm:grid-cols-2">
+            {addresses.map((a) => (
+              <div key={a.addressId} className={cn("relative border p-5 text-[0.86rem] transition-colors", selected === a.addressId ? "border-espresso bg-sand/50" : "border-espresso/20")}>
+                <label className="flex cursor-pointer gap-3">
+                  <input type="radio" name="address" checked={selected === a.addressId} onChange={() => setSelected(a.addressId)} className="mt-1 accent-espresso" />
+                  <AddressLines address={a} />
+                </label>
+                <div className="mt-4 flex gap-5 pl-7">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdding(false);
+                      setEditing(a.addressId);
+                    }}
+                    className={cn("label text-[0.58rem] hover:text-ink", editing === a.addressId ? "text-ink" : "text-ink-faint")}
+                    aria-label="Edit this address"
+                  >
+                    Edit
+                  </button>
+                  <button type="button" onClick={() => removeAddress(a.addressId)} className="label text-[0.58rem] text-ink-faint hover:text-ink" aria-label="Remove this address">
+                    Remove
+                  </button>
+                </div>
+                {removeError?.id === a.addressId && <p className="mt-3 text-[0.75rem] text-[#9b3b2a]">{removeError.message}</p>}
+              </div>
+            ))}
+          </div>
+        )}
+        {addresses && editing !== null && addresses.some((a) => a.addressId === editing) && (
+          <div className="mt-5 border border-hair bg-sand/40 p-5 md:p-7">
+            <p className="label mb-6">Edit address</p>
+            <AddressForm
+              key={editing}
+              address={addresses.find((a) => a.addressId === editing)}
+              submitLabel="Save and use this address"
+              onSaved={(a) => {
+                setAddresses((l) => l?.map((x) => (x.addressId === a.addressId ? a : x)) ?? l);
+                setSelected(a.addressId);
+                setEditing(null);
+              }}
+              onCancel={() => setEditing(null)}
+            />
+          </div>
+        )}
+        {addresses && !adding && editing === null && (
+          <button
+            type="button"
+            onClick={() => {
+              setEditing(null);
+              setAdding(true);
+            }}
+            className="label link-underline mt-5 pb-1"
+          >
+            + Add a new address
+          </button>
+        )}
+        {addresses && adding && (
+          <div className="mt-5 border border-hair bg-sand/40 p-5 md:p-7">
+            <p className="label mb-6">{addresses.length ? "New address" : "Where should we deliver?"}</p>
+            <AddressForm
+              submitLabel="Save and use this address"
+              onSaved={(a) => {
+                setAddresses((l) => [...(l ?? []), a]);
+                setSelected(a.addressId);
+                setAdding(false);
+              }}
+              onCancel={addresses.length ? () => setAdding(false) : undefined}
+            />
+          </div>
+        )}
+      </fieldset>
+
+      <fieldset className="mt-10" disabled={working}>
+        <legend className="label mb-5">Payment</legend>
+        <div className="grid gap-2">
+          {METHODS.map((m) => (
+            <label key={m.id} className={cn("flex cursor-pointer items-center gap-4 border px-4 py-4 transition-colors", method === m.id ? "border-espresso" : "border-espresso/20")}>
+              <input type="radio" name="payment" value={m.id} checked={method === m.id} onChange={() => setMethod(m.id)} className="accent-espresso" />
+              <span className="flex-1">
+                <span className="block text-[0.9rem]">{m.label}</span>
+                <span className="text-[0.75rem] text-ink-muted">{m.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      {payResult && payResult.kind !== "paid" && (
+        <PaymentNotice result={payResult} canRetry={payResult.kind === "dismissed" || payResult.kind === "error"} onRetry={placeOrder} working={working} />
+      )}
+
+      <Button type="button" size="lg" className="mt-10 w-full" onClick={placeOrder} disabled={!ready || working} aria-busy={working}>
+        <Lock className="h-3.5 w-3.5" strokeWidth={1.5} />
+        {phase === "placing"
+          ? "Placing order"
+          : phase === "paying"
+            ? "Waiting for payment"
+            : phase === "verifying"
+              ? "Confirming payment"
+              : method === "COD"
+                ? `Place order${total ? ` · ${total}` : ""}`
+                : `${pendingHere ? "Resume payment" : "Pay securely"}${total ? ` · ${total}` : ""}`}
+      </Button>
+      <FormStatus error={placeError} pending={phase === "placing"} className="mt-4" />
+      {!ready && !working && !problems.length && (
+        <p className="mt-3 text-[0.78rem] text-ink-faint">{cartBusy ? "Updating your bag…" : !address ? "Choose or add a delivery address to continue." : !price ? "Calculating your total…" : null}</p>
+      )}
+      <p className="mt-4 text-[0.75rem] leading-relaxed text-ink-faint">
+        {method === "RAZORPAY"
+          ? `Payment opens in Razorpay's secure window. Your order is reserved for ${PAYMENT_WINDOW_MINUTES} minutes while you pay, and it's confirmed only after our server verifies the payment.`
+          : "You'll pay the courier when your order arrives."}
+      </p>
+    </Layout>
+  );
+}
+
+function PaymentNotice({ result, canRetry, onRetry, working }: { result: Exclude<PayResult, { kind: "paid" }>; canRetry: boolean; onRetry: () => void; working: boolean }) {
+  const title =
+    result.kind === "dismissed" ? "Payment not completed" : result.kind === "unverified" ? "Payment not confirmed yet" : result.kind === "closed" ? "Order closed" : "Couldn't open payment";
+  return (
+    <Notice tone={result.kind === "dismissed" ? "info" : "error"} title={title}>
+      <p>{result.message}</p>
+      {result.kind === "dismissed" && <p className="mt-2">Your order #{result.orderId} is reserved for {PAYMENT_WINDOW_MINUTES} minutes. Nothing has been charged.</p>}
+      <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2">
+        {canRetry && (
+          <button type="button" onClick={onRetry} disabled={working} className="label underline underline-offset-4">
+            Try payment again
+          </button>
+        )}
+        <Link href={`/account/orders/${result.orderId}`} className="label underline underline-offset-4">
+          View order #{result.orderId}
+        </Link>
+      </div>
+    </Notice>
+  );
+}
+
+function Notice({ tone, title, children }: { tone: "info" | "error"; title?: string; children: React.ReactNode }) {
+  return (
+    <div role={tone === "error" ? "alert" : "status"} className={cn("mt-8 border-l-2 bg-sand/50 px-5 py-4 text-[0.86rem]", tone === "error" ? "border-[#9b3b2a]" : "border-gold")}>
+      {title && <p className={cn("label mb-2", tone === "error" && "text-[#9b3b2a]")}>{title}</p>}
+      <div className="text-ink-muted">{children}</div>
+    </div>
+  );
+}
+
+function Layout({ children, summary }: { children: React.ReactNode; summary: React.ReactNode }) {
+  return (
+    <div className="bg-ivory">
+      <div className="container-site grid grid-cols-1 gap-12 py-12 md:py-16 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] lg:gap-20">
+        <div className="order-2 lg:order-1">{children}</div>
+        <aside aria-label="Order summary" className="order-1 lg:order-2">
+          <div className="border border-hair bg-sand/60 p-6 md:p-8 lg:sticky lg:top-28">{summary}</div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function Summary({ cart, children }: { cart: Cart; children: React.ReactNode }) {
+  return (
+    <>
+      <p className="label">Order summary</p>
+      <ul className="mt-6 divide-y divide-[rgba(50,24,14,0.12)]">
+        {cart.lines.map((l) => (
+          <li key={l.key} className="flex gap-4 py-4">
+            <div className={cn("relative h-20 w-16 shrink-0", l.world === "attar" ? "bg-espresso" : "bg-sand")}>
+              <ProductPhoto src={l.image ?? undefined} alt={l.name} dark={l.world === "attar"} sizes="64px" compact />
+              <span className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-espresso px-1 text-[0.62rem] text-ivory tabular">{l.quantity}</span>
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="font-display text-[1.1rem] uppercase leading-tight">{l.name}</p>
+            </div>
+            <p className="text-[0.88rem] tabular">{formatPaise(l.lineTotal)}</p>
+          </li>
+        ))}
+      </ul>
+      {children}
+      <Link href="/collections/all" className="label mt-6 inline-block underline-offset-4 hover:underline">
+        Continue shopping
+      </Link>
+    </>
+  );
+}
+
+function ServerTotals({ price, onRemoveCoupon }: { price: PriceBreakdown; onRemoveCoupon?: () => void }) {
+  return (
+    <>
+      <dl className="mt-4 space-y-2 border-t border-hair pt-5 text-[0.88rem]">
+        <div className="flex justify-between">
+          <dt className="text-ink-muted">Subtotal</dt>
+          <dd className="tabular">{formatPaise(price.subtotal)}</dd>
+        </div>
+        {price.productSavings > 0 && (
+          <div className="flex justify-between text-gold-deep">
+            <dt>You save on MRP</dt>
+            <dd className="tabular">{formatPaise(price.productSavings)}</dd>
+          </div>
+        )}
+        {price.couponCode && (
+          <div className="flex items-baseline justify-between gap-4 text-gold-deep">
+            <dt>
+              Coupon {price.couponCode}
+              {onRemoveCoupon && (
+                <button type="button" onClick={onRemoveCoupon} className="ml-3 text-[0.72rem] text-ink-muted underline underline-offset-2 hover:text-ink">
+                  Remove
+                </button>
+              )}
+            </dt>
+            <dd className="tabular">−{formatPaise(price.couponDiscount)}</dd>
+          </div>
+        )}
+        <div className="flex justify-between">
+          <dt className="text-ink-muted">Shipping</dt>
+          <dd className="tabular">{price.shipping ? formatPaise(price.shipping) : "Complimentary"}</dd>
+        </div>
+        <div className="flex justify-between border-t border-hair pt-4 text-[1.05rem]">
+          <dt>Total</dt>
+          <dd className="font-medium tabular">{formatPaise(price.total)}</dd>
+        </div>
+      </dl>
+      <p className="mt-3 text-[0.72rem] text-ink-faint">
+        {isIntl ? "Duties and import taxes may apply on delivery." : "Inclusive of GST."}{price.shipping > 0 ? ` Complimentary shipping on orders above ${formatPrice(site.freeShippingThreshold)}.` : ""}
+      </p>
+    </>
+  );
+}
