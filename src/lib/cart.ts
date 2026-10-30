@@ -82,6 +82,7 @@ export interface LineProblem {
 
 export function lineProblem(l: CartLine): LineProblem | null {
   if (!l.active) return { message: `${l.name} is no longer available.`, canOrder: 0 };
+  if (isIntl && l.price <= 0) return { message: `${l.name} can't be shipped internationally yet.`, canOrder: 0 };
   if (l.stock <= 0) return { message: `${l.name} is out of stock.`, canOrder: 0 };
   if (l.quantity > l.stock) return { message: `Only ${l.stock} left of ${l.name}.`, canOrder: l.stock };
   return null;

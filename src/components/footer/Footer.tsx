@@ -51,7 +51,8 @@ export function Footer() {
         </div>
 
         <div className="container-site flex flex-col gap-3 border-t border-hair-light py-6 text-[0.72rem] text-ivory/45 md:flex-row md:items-center md:justify-between">
-          <p>© {new Date().getFullYear()} {site.name}. Prices in INR, inclusive of GST.</p>
+          {/* <p>© {new Date().getFullYear()} {site.name}. Prices in INR, inclusive of GST.</p> */}
+          <p>© {new Date().getFullYear()} {site.name}. {isIntl ? "Prices in USD. Duties and import taxes payable on delivery." : "Prices in INR, inclusive of GST."}</p>
           <p>{isIntl ? "Cards · Secured by Razorpay" : "UPI · Cards · Net banking · Cash on delivery"}</p>
         </div>
       </div>
