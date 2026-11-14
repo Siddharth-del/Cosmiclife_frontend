@@ -78,14 +78,14 @@ export function CategoryShelves({ categories, products }: { categories: Category
           <section key={shelf.slug} aria-labelledby={titleId} className="category-surface overflow-hidden py-12 md:py-16" style={paletteVars(palette)}>
             <div className="container-site">
               <Reveal y={16}>
-                <div className="mb-6 flex items-end justify-between gap-6 md:mb-8">
-                  <div className="min-w-0">
+                <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between sm:gap-6 md:mb-8">
+                  <div className="min-w-0 sm:flex-1">
                     <p className="eyebrow category-accent mb-2">{shelf.total} {shelf.total === 1 ? "piece" : "pieces"}</p>
-                    <h2 id={titleId} className="text-display-sm uppercase">
+                    <h2 id={titleId} className="break-words text-display-sm uppercase">
                       {shelf.label}
                     </h2>
                   </div>
-                  <TextLink href={shelf.href} className="shrink-0">
+                  <TextLink href={shelf.href} className="self-start sm:shrink-0 sm:self-auto">
                     View all {shelf.label}
                   </TextLink>
                 </div>
