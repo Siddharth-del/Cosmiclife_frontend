@@ -245,6 +245,7 @@ export default function AdminProducts() {
                           {[
                             p.gender && GENDER_LABEL[p.gender],
                             p.fragranceFamily && familyLabel(p.fragranceFamily),
+                            !p.category && p.productTypeName,
                           ]
                             .filter(Boolean)
                             .join(" · ") || "—"}

@@ -1,32 +1,29 @@
 import { HeroSection } from "@/components/hero/HeroSection";
 import { HeroCarousel } from "@/components/hero/HeroCarousel";
-import { WorldsSplit } from "@/components/collections/WorldsSplit";
-import { ShopByCategory } from "@/components/category/ShopByCategory";
-import { Bestsellers } from "@/components/products/Bestsellers";
+import { CategoryShelves } from "@/components/category/CategoryShelves";
 import { GiftingBanner } from "@/components/gifting/GiftingBanner";
-import { HandicraftCollection } from "@/components/collections/HandicraftCollection";
 import { FragranceDiscovery } from "@/components/discovery/FragranceDiscovery";
 import { JournalSection } from "@/components/editorial/JournalSection";
 import { Testimonials } from "@/components/testimonials/Testimonials";
 import { WhyChooseUs } from "@/components/brand/WhyChooseUs";
 import { CatalogEmpty, CatalogUnavailable } from "@/components/layout/CatalogUnavailable";
-import { getBanners, getCategories, getCollection, getCollectionProducts, getJournal, getProducts, getTestimonials, isFragrance } from "@/lib/catalog";
+import { getBanners, getCategories, getJournal, getProducts, getTestimonials, isFragrance } from "@/lib/catalog";
 import { bannerSlides } from "@/lib/api/banners";
 import { useLoaderData } from "react-router";
 import { usePageMeta } from "@/hooks/usePageMeta";
 
 export async function loader() {
-  const [journal, testimonials, handicraftCollection, banners] = await Promise.all([getJournal(), getTestimonials(), getCollection("handicraft"), getBanners()]);
+  const [journal, testimonials, banners] = await Promise.all([getJournal(), getTestimonials(), getBanners()]);
   try {
-    const [products, categories, handicraft] = await Promise.all([getProducts(), getCategories(), getCollectionProducts("handicraft")]);
-    return { products, categories, handicraft, handicraftCollection, banners, journal, testimonials, catalogError: null as string | null };
+    const [products, categories] = await Promise.all([getProducts(), getCategories()]);
+    return { products, categories, banners, journal, testimonials, catalogError: null as string | null };
   } catch (e) {
-    return { products: [], categories: [], handicraft: [], handicraftCollection, banners, journal, testimonials, catalogError: e instanceof Error ? e.message : "We couldn't load our fragrances." };
+    return { products: [], categories: [], banners, journal, testimonials, catalogError: e instanceof Error ? e.message : "We couldn't load our fragrances." };
   }
 }
 
 export default function HomePage() {
-  const { products, categories, handicraft, handicraftCollection, banners, journal, testimonials, catalogError } = useLoaderData<typeof loader>();
+  const { products, categories, banners, journal, testimonials, catalogError } = useLoaderData<typeof loader>();
   usePageMeta();
   const heroSlides = bannerSlides(banners.HERO);
   const fragrances = products.filter(isFragrance);
@@ -49,10 +46,7 @@ export default function HomePage() {
         </section>
       ) : (
         <>
-          <Bestsellers categories={categories} products={products} />
-          <ShopByCategory categories={categories} />
-          <WorldsSplit />
-          {handicraftCollection && <HandicraftCollection collection={handicraftCollection} products={[...handicraft].sort((a, b) => b.productId - a.productId)} />}
+          <CategoryShelves categories={categories} products={products} />
           <GiftingBanner sets={newest} />
           <FragranceDiscovery products={fragrances} />
         </>

@@ -53,8 +53,8 @@ export const GENDER_LABEL: Record<GenderEnum, string> = { MEN: "Men", WOMEN: "Wo
 export const CATEGORY_LABEL: Record<CategoryEnum, string> = { PERFUME: "Perfume", ATTAR: "Attar", HANDICRAFT: "Handicraft" };
 export const MATERIAL_LABEL: Record<MaterialEnum, string> = { BRASS: "Brass", COPPER: "Copper", OTHERS: "Others" };
 
-export function productTypeLabel(p: Pick<ProductDTO, "category" | "fragranceFamily" | "material">) {
-  if (productWorld(p) !== "handicraft") return p.category ? CATEGORY_LABEL[p.category] : "—";
+export function productTypeLabel(p: Pick<ProductDTO, "category" | "fragranceFamily" | "material" | "categoryName">) {
+  if (productWorld(p) !== "handicraft") return p.category ? CATEGORY_LABEL[p.category] : p.categoryName?.trim() || "—";
   const material = p.material ? MATERIAL_LABEL[p.material] : null;
   return material ? `${CATEGORY_LABEL.HANDICRAFT} · ${material}` : CATEGORY_LABEL.HANDICRAFT;
 }

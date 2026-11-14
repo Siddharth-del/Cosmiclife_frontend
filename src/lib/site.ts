@@ -97,12 +97,23 @@ export const mainNav: { label: string; href: string; world?: "attar" | "perfume"
 
 const collectionSlug = (href: string) => href.replace(/^\/collections\//, "").split("?")[0].toLowerCase();
 
+const stem = (s: string) => s.trim().toLowerCase().replace(/s$/, "");
+
 export function navWithCategories(categories: { slug: string; name: string }[]): typeof mainNav {
   if (!categories.length) return mainNav;
 
-  const inNav = new Set(mainNav.filter((n) => n.href.startsWith("/collections/")).map((n) => collectionSlug(n.href)));
+  const taken = new Set<string>();
+  for (const n of mainNav) {
+    taken.add(stem(n.label));
+    if (n.href.startsWith("/collections/")) taken.add(stem(collectionSlug(n.href)));
+  }
 
-  const extra = categories.filter((c) => !inNav.has(c.slug.toLowerCase())).map((c) => ({ label: c.name, href: `/collections/${c.slug}` }));
+  const extra = categories.filter((c) => {
+    const keys = [stem(c.slug), stem(c.name)];
+    if (keys.some((k) => taken.has(k))) return false;
+    keys.forEach((k) => taken.add(k));
+    return true;
+  }).map((c) => ({ label: c.name, href: `/collections/${c.slug}` }));
   if (!extra.length) return mainNav;
 
   const at = mainNav.findIndex((n) => !n.world);
