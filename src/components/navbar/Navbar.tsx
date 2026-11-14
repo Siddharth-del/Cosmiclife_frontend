@@ -6,7 +6,6 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowRight, Heart, LayoutDashboard, Menu, Search, ShoppingBag, User } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useHydrated } from "@/hooks/useHydrated";
-import { useScrolled } from "@/hooks/useScrolled";
 import { useCartCount } from "@/store/cart";
 import { useWishlist } from "@/store/wishlist";
 import { useUI } from "@/store/ui";
@@ -18,7 +17,6 @@ import { Wordmark } from "@/components/ui/Wordmark";
 import { MobileMenu } from "./MobileMenu";
 
 export function Navbar() {
-  const scrolled = useScrolled(12);
   const { pathname } = useLocation();
   const user = useAuth((s) => s.user);
   const hydrated = useHydrated();
@@ -45,8 +43,7 @@ export function Navbar() {
     setPanel(null);
   }, [pathname, setMenu]);
 
-  const onHero = !scrolled && pathname === "/";
-  const dark = onHero && !panel;
+  const dark = false;
 
   return (
     <>
