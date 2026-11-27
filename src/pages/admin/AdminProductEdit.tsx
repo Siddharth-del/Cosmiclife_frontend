@@ -597,11 +597,7 @@ function GalleryPanel({
       invalidateCatalog();
       toast({ title: queue.length === 1 ? "Image added" : `${queue.length} images added`, description: product.name });
     } catch (e) {
-      setError(
-        e instanceof ApiError && (e.status === 413 || e.status === 500)
-          ? "The server didn't accept those images. Raise spring.servlet.multipart.max-request-size on the backend, or upload fewer at a time."
-          : errorMessage(e),
-      );
+      setError(errorMessage(e));
     } finally {
       setBusy(null);
     }
